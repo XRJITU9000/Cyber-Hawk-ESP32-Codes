@@ -1,245 +1,192 @@
 /*
-=============================================================
-  CYBER HAWK - ESP32 WROOM Flight Controller v4.0
-  Compatible with CYBER HAWK Genesis Edition HTML Dashboard
-=============================================================
-
-  ENDPOINTS MATCHED TO HTML:
-  - /joystick?roll=&pitch=&yaw=&throttle=   ← joystick values -1.0 to 1.0
-  - /command?cmd=ARM
-  - /command?cmd=DISARM
-  - /command?cmd=LED
-  - /command?cmd=HOVER
-  - /command?cmd=RTH
-  - /command?cmd=FLIP_FRONT
-  - /command?cmd=FLIP_BACK
-  - /command?cmd=HEADLESS_ON
-  - /command?cmd=HEADLESS_OFF
-  - /status                                  ← connection check (HEAD request)
-
-  MOTOR LAYOUT (top view):
-       M1(CW)  M2(CCW)
-       M4(CCW) M3(CW)
-=============================================================
+=================================================
+ CYBER HAWK v6 – Advanced Stabilized Edition
+ Auto Calibration + Smart Flip + Yaw PID
+=================================================
 */
 
-#include <WiFi.h>
-#include <WebServer.h>
+#include <Wire.h>
+#include <MPU6050.h>
 
-// ── WiFi ────────────────────────────────────────────────
-const char* ssid     = "CYBER_HAWK";
-const char* password = "12345678";
+MPU6050 mpu;
 
-WebServer server(80);
+#define RXD2 16
+#define TXD2 17
 
-// ── Motor Pins ──────────────────────────────────────────
-#define M1      25
-#define M2      26
-#define M3      27
-#define M4      14
-#define LED_PIN  2
+#define M1 25
+#define M2 26
+#define M3 27
+#define M4 14
+#define LED_PIN 2
 
-// ── PWM Config ──────────────────────────────────────────
-const int PWM_FREQ       = 5000;
-const int PWM_RESOLUTION = 8;      // 0–255
+const int PWM_FREQ = 20000;
+const int PWM_RES = 8;
 
-// ── State ───────────────────────────────────────────────
-bool armed        = false;
-bool hoverMode    = false;
-bool headlessMode = false;
-bool ledState     = false;
+bool armed = false;
+bool hoverMode = false;
+bool flipActive = false;
 
-// Joystick values — normalized floats -1.0 to 1.0
-float fRoll     = 0;
-float fPitch    = 0;
-float fYaw      = 0;
-float fThrottle = 0;
+float fRoll=0, fPitch=0, fYaw=0, fThrottle=0;
 
-// ── PWM Setup ───────────────────────────────────────────
-void setupPWM() {
-  ledcSetup(0, PWM_FREQ, PWM_RESOLUTION);
-  ledcSetup(1, PWM_FREQ, PWM_RESOLUTION);
-  ledcSetup(2, PWM_FREQ, PWM_RESOLUTION);
-  ledcSetup(3, PWM_FREQ, PWM_RESOLUTION);
+float roll=0, pitch=0, yawRate=0;
+float rollSet=0, pitchSet=0, yawSet=0;
 
-  ledcAttachPin(M1, 0);
-  ledcAttachPin(M2, 1);
-  ledcAttachPin(M3, 2);
-  ledcAttachPin(M4, 3);
+float gyroXoff=0, gyroYoff=0, gyroZoff=0;
+
+float kp=3.5, ki=0.02, kd=1.8;
+float yawKp=2.0;
+
+float rSum=0, pSum=0;
+float rPrev=0, pPrev=0;
+
+float hoverThrottle=0;
+
+unsigned long lastTime;
+
+void setupPWM(){
+  ledcSetup(0,PWM_FREQ,PWM_RES);
+  ledcSetup(1,PWM_FREQ,PWM_RES);
+  ledcSetup(2,PWM_FREQ,PWM_RES);
+  ledcSetup(3,PWM_FREQ,PWM_RES);
+  ledcAttachPin(M1,0);
+  ledcAttachPin(M2,1);
+  ledcAttachPin(M3,2);
+  ledcAttachPin(M4,3);
 }
 
-// ── Motor Write ─────────────────────────────────────────
-void setMotors(int m1, int m2, int m3, int m4) {
-  if (!armed) {
-    m1 = m2 = m3 = m4 = 0;
-  }
-  ledcWrite(0, constrain(m1, 0, 255));
-  ledcWrite(1, constrain(m2, 0, 255));
-  ledcWrite(2, constrain(m3, 0, 255));
-  ledcWrite(3, constrain(m4, 0, 255));
+void setMotors(int a,int b,int c,int d){
+  if(!armed) a=b=c=d=0;
+  ledcWrite(0,constrain(a,0,255));
+  ledcWrite(1,constrain(b,0,255));
+  ledcWrite(2,constrain(c,0,255));
+  ledcWrite(3,constrain(d,0,255));
 }
 
-// ── Mix & Apply ─────────────────────────────────────────
-void applyMix() {
-  if (!armed || hoverMode) {
-    setMotors(0, 0, 0, 0);
-    return;
+void calibrateMPU(){
+  Serial.println("CALIBRATING...");
+  for(int i=0;i<1000;i++){
+    int16_t ax,ay,az,gx,gy,gz;
+    mpu.getMotion6(&ax,&ay,&az,&gx,&gy,&gz);
+    gyroXoff+=gx;
+    gyroYoff+=gy;
+    gyroZoff+=gz;
+    delay(3);
   }
-
-  // Scale normalized values to motor range
-  int thr  = (int)(fThrottle * 200) + 55;   // 55–255 range when armed
-  int pit  = (int)(fPitch    * 60);
-  int rol  = (int)(fRoll     * 60);
-  int yaw  = (int)(fYaw      * 40);
-
-  // Standard quadcopter X-frame mixing
-  int m1 = thr + pit + rol - yaw;
-  int m2 = thr + pit - rol + yaw;
-  int m3 = thr - pit + rol + yaw;
-  int m4 = thr - pit - rol - yaw;
-
-  setMotors(m1, m2, m3, m4);
+  gyroXoff/=1000;
+  gyroYoff/=1000;
+  gyroZoff/=1000;
+  Serial.println("CALIBRATION DONE");
 }
 
-// ── CORS Headers ────────────────────────────────────────
-// Required so browser can reach ESP32 from HTML file
-void addCORS() {
-  server.sendHeader("Access-Control-Allow-Origin",  "*");
-  server.sendHeader("Access-Control-Allow-Methods", "GET, HEAD, OPTIONS");
-  server.sendHeader("Access-Control-Allow-Headers", "*");
+void readMPU(){
+  int16_t ax,ay,az,gx,gy,gz;
+  mpu.getMotion6(&ax,&ay,&az,&gx,&gy,&gz);
+
+  gx-=gyroXoff;
+  gy-=gyroYoff;
+  gz-=gyroZoff;
+
+  float accelRoll=atan2(ay,az)*57.3;
+  float accelPitch=atan2(-ax,sqrt(ay*ay+az*az))*57.3;
+
+  float dt=(millis()-lastTime)/1000.0;
+  lastTime=millis();
+
+  roll=0.98*(roll+(gx/131.0)*dt)+0.02*accelRoll;
+  pitch=0.98*(pitch+(gy/131.0)*dt)+0.02*accelPitch;
+  yawRate=gz/131.0;
 }
 
-// ── /status  (HEAD request for connection check) ────────
-void handleStatus() {
-  addCORS();
-  server.send(200, "text/plain", "OK");
+float pid(float set,float cur,float &sum,float &prev){
+  float err=set-cur;
+  sum+=err;
+  float d=err-prev;
+  prev=err;
+  return kp*err+ki*sum+kd*d;
 }
 
-// ── /joystick ───────────────────────────────────────────
-// HTML sends: /joystick?roll=X&pitch=X  or  ?yaw=X&throttle=X
-void handleJoystick() {
-  addCORS();
+void applyControl(){
+  if(flipActive) return;
 
-  if (server.hasArg("roll"))     fRoll     = server.arg("roll").toFloat();
-  if (server.hasArg("pitch"))    fPitch    = server.arg("pitch").toFloat();
-  if (server.hasArg("yaw"))      fYaw      = server.arg("yaw").toFloat();
-  if (server.hasArg("throttle")) fThrottle = server.arg("throttle").toFloat();
+  float rCorr=pid(rollSet,roll,rSum,rPrev);
+  float pCorr=pid(pitchSet,pitch,pSum,pPrev);
+  float yCorr=yawKp*(yawSet-yawRate);
 
-  // Clamp all values to -1.0 … 1.0
-  fRoll     = constrain(fRoll,     -1.0, 1.0);
-  fPitch    = constrain(fPitch,    -1.0, 1.0);
-  fYaw      = constrain(fYaw,      -1.0, 1.0);
-  fThrottle = constrain(fThrottle, -1.0, 1.0);
+  int base=hoverMode?hoverThrottle:(int)(fThrottle*200)+55;
 
-  applyMix();
-  server.send(200, "text/plain", "OK");
+  int m1=base+pCorr+rCorr-yCorr;
+  int m2=base+pCorr-rCorr+yCorr;
+  int m3=base-pCorr+rCorr+yCorr;
+  int m4=base-pCorr-rCorr-yCorr;
+
+  setMotors(m1,m2,m3,m4);
 }
 
-// ── /command ────────────────────────────────────────────
-void handleCommand() {
-  addCORS();
-  String cmd = server.arg("cmd");
-
-  if (cmd == "ARM") {
-    armed = true;
-    Serial.println("ARMED");
-  }
-  else if (cmd == "DISARM") {
-    armed = false;
-    fRoll = fPitch = fYaw = fThrottle = 0;
-    setMotors(0, 0, 0, 0);
-    Serial.println("DISARMED");
-  }
-  else if (cmd == "LED") {
-    // HTML sends single LED command — toggle on each press
-    ledState = !ledState;
-    digitalWrite(LED_PIN, ledState ? HIGH : LOW);
-    Serial.println(ledState ? "LED ON" : "LED OFF");
-  }
-  else if (cmd == "HOVER") {
-    hoverMode = !hoverMode;
-    if (hoverMode) {
-      fRoll = fPitch = fYaw = fThrottle = 0;
-      setMotors(0, 0, 0, 0);
-    }
-    Serial.println(hoverMode ? "HOVER ON" : "HOVER OFF");
-  }
-  else if (cmd == "RTH") {
-    // Return to home — cut throttle gradually, disarm on land
-    // Basic implementation: disarm motors
-    armed = false;
-    fRoll = fPitch = fYaw = fThrottle = 0;
-    setMotors(0, 0, 0, 0);
-    Serial.println("RTH TRIGGERED");
-  }
-  else if (cmd == "FLIP_FRONT") {
-    // Send brief forward pitch pulse
-    if (armed) {
-      setMotors(200, 200, 50, 50);
-      delay(300);
-      applyMix();
-    }
-    Serial.println("FLIP FRONT");
-  }
-  else if (cmd == "FLIP_BACK") {
-    // Send brief reverse pitch pulse
-    if (armed) {
-      setMotors(50, 50, 200, 200);
-      delay(300);
-      applyMix();
-    }
-    Serial.println("FLIP BACK");
-  }
-  else if (cmd == "HEADLESS_ON") {
-    headlessMode = true;
-    Serial.println("HEADLESS ON");
-  }
-  else if (cmd == "HEADLESS_OFF") {
-    headlessMode = false;
-    Serial.println("HEADLESS OFF");
-  }
-
-  server.send(200, "text/plain", "CMD_OK");
+void smartFlip(bool front){
+  flipActive=true;
+  int power=200;
+  if(front) setMotors(power,power,50,50);
+  else setMotors(50,50,power,power);
+  delay(350);
+  flipActive=false;
 }
 
-// ── /options (preflight CORS) ───────────────────────────
-void handleOptions() {
-  addCORS();
-  server.send(204);
+void parseJoystick(String s){
+  int i=s.indexOf(':');
+  String v=s.substring(i+1);
+  int p1=v.indexOf(',');
+  int p2=v.indexOf(',',p1+1);
+  int p3=v.indexOf(',',p2+1);
+
+  fThrottle=v.substring(0,p1).toFloat()/255.0;
+  fPitch=v.substring(p1+1,p2).toFloat()/100.0;
+  fRoll=v.substring(p2+1,p3).toFloat()/100.0;
+  fYaw=v.substring(p3+1).toFloat()/100.0;
+
+  if(!hoverMode){
+    rollSet=fRoll*15;
+    pitchSet=fPitch*15;
+  }
+
+  yawSet=fYaw*50;
 }
 
-// ── Setup ───────────────────────────────────────────────
-void setup() {
+void parseCommand(String c){
+  c.replace("CMD:","");
+  if(c=="ARM") armed=true;
+  else if(c=="DISARM"){armed=false;setMotors(0,0,0,0);}
+  else if(c=="HOVER"){
+    hoverMode=!hoverMode;
+    hoverThrottle=(int)(fThrottle*200)+55;
+    rollSet=0; pitchSet=0;
+  }
+  else if(c=="FLIP_FRONT") smartFlip(true);
+  else if(c=="FLIP_BACK") smartFlip(false);
+  else if(c=="LED") digitalWrite(LED_PIN,!digitalRead(LED_PIN));
+}
+
+void setup(){
   Serial.begin(115200);
-  pinMode(LED_PIN, OUTPUT);
-  digitalWrite(LED_PIN, LOW);
+  Serial2.begin(115200,SERIAL_8N1,RXD2,TXD2);
 
+  Wire.begin(21,22);
+  mpu.initialize();
+  delay(1000);
+  calibrateMPU();
+
+  pinMode(LED_PIN,OUTPUT);
   setupPWM();
-  setMotors(0, 0, 0, 0);
-
-  WiFi.softAP(ssid, password);
-  Serial.print("AP IP: ");
-  Serial.println(WiFi.softAPIP());
-
-  server.on("/status",   HTTP_GET,  handleStatus);
-  server.on("/status",   HTTP_HEAD, handleStatus);
-  server.on("/joystick", HTTP_GET,  handleJoystick);
-  server.on("/command",  HTTP_GET,  handleCommand);
-
-  // Handle CORS preflight for all routes
-  server.onNotFound([](){
-    if (server.method() == HTTP_OPTIONS) {
-      handleOptions();
-    } else {
-      server.send(404, "text/plain", "Not Found");
-    }
-  });
-
-  server.begin();
-  Serial.println("CYBER HAWK Flight Controller Ready");
+  lastTime=millis();
 }
 
-// ── Loop ────────────────────────────────────────────────
-void loop() {
-  server.handleClient();
+void loop(){
+  readMPU();
+
+  if(Serial2.available()){
+    String d=Serial2.readStringUntil('\n');
+    if(d.startsWith("J:")) parseJoystick(d);
+    if(d.startsWith("CMD:")) parseCommand(d);
+  }
+
+  if(armed) applyControl();
 }
