@@ -123,12 +123,58 @@ void applyControl(){
 }
 
 void smartFlip(bool front){
-  flipActive=true;
-  int power=200;
-  if(front) setMotors(power,power,50,50);
-  else setMotors(50,50,power,power);
-  delay(350);
-  flipActive=false;
+void smartFlip(bool front){
+  if(!armed) return;
+  if(fThrottle < 0.6) return;   // require enough throttle
+  if(flipActive) return;
+
+  flipActive = true;
+
+  float startAngle = front ? pitch : roll;
+  float target = startAngle + 360.0;
+
+  unsigned long flipStart = millis();
+
+  while(true){
+
+    readMPU();
+
+    float current = front ? pitch : roll;
+
+    int base = (int)(fThrottle * 200) + 55;
+
+    int flipPower = 180;   // strong but controlled
+
+    int m1,m2,m3,m4;
+
+    if(front){
+      // Front flip (pitch forward)
+      m1 = base + flipPower;
+      m2 = base + flipPower;
+      m3 = base - flipPower;
+      m4 = base - flipPower;
+    } else {
+      // Back flip (roll)
+      m1 = base + flipPower;
+      m2 = base - flipPower;
+      m3 = base + flipPower;
+      m4 = base - flipPower;
+    }
+
+    setMotors(m1,m2,m3,m4);
+
+    if(current >= target) break;
+
+    if(millis() - flipStart > 800) break;  // safety timeout
+  }
+
+  flipActive = false;
+
+  // Reset PID memory to avoid violent correction
+  rSum = 0;
+  pSum = 0;
+  rPrev = 0;
+  pPrev = 0;
 }
 
 void parseJoystick(String s){
