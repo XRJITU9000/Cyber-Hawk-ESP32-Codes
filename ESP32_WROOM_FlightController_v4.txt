@@ -121,8 +121,6 @@ void applyControl(){
 
   setMotors(m1,m2,m3,m4);
 }
-
-void smartFlip(bool front){
 void smartFlip(bool front){
   if(!armed) return;
   if(fThrottle < 0.6) return;   // require enough throttle
