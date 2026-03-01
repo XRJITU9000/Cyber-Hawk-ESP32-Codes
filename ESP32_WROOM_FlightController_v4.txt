@@ -121,38 +121,33 @@ void applyControl(){
 
   setMotors(m1,m2,m3,m4);
 }
+
 void smartFlip(bool front){
   if(!armed) return;
-  if(fThrottle < 0.6) return;   // require enough throttle
+  if(fThrottle < 0.65) return;   // require strong throttle
   if(flipActive) return;
 
   flipActive = true;
 
-  float startAngle = front ? pitch : roll;
-  float target = startAngle + 360.0;
-
   unsigned long flipStart = millis();
+  int flipPower = 200;
 
-  while(true){
+  while(millis() - flipStart < 450){   // controlled flip duration
 
     readMPU();
 
-    float current = front ? pitch : roll;
-
     int base = (int)(fThrottle * 200) + 55;
-
-    int flipPower = 180;   // strong but controlled
 
     int m1,m2,m3,m4;
 
     if(front){
-      // Front flip (pitch forward)
+      // Front flip (Pitch axis)
       m1 = base + flipPower;
       m2 = base + flipPower;
       m3 = base - flipPower;
       m4 = base - flipPower;
     } else {
-      // Back flip (roll)
+      // Back flip (Roll axis)
       m1 = base + flipPower;
       m2 = base - flipPower;
       m3 = base + flipPower;
@@ -160,15 +155,15 @@ void smartFlip(bool front){
     }
 
     setMotors(m1,m2,m3,m4);
-
-    if(current >= target) break;
-
-    if(millis() - flipStart > 800) break;  // safety timeout
   }
+
+  // STOP flip burst
+  setMotors(0,0,0,0);
+  delay(50);
 
   flipActive = false;
 
-  // Reset PID memory to avoid violent correction
+  // Reset PID memory to prevent violent correction
   rSum = 0;
   pSum = 0;
   rPrev = 0;
