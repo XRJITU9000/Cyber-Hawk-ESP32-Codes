@@ -14,8 +14,8 @@
 #define TXD2 1
 
 // ==== WIFI ====
-const char* ssid = "YOUR_WIFI_NAME";
-const char* password = "YOUR_WIFI_PASSWORD";
+const char* ssid = "CYBER_HAWK";
+const char* password = "CYBER_HAWK";
 
 WebServer server(80);
 
