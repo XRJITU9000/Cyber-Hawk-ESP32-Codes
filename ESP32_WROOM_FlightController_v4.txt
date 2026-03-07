@@ -1,6 +1,7 @@
 /*
 =================================================
  CYBER HAWK v6.5 – STABLE FLIGHT CONTROLLER
+ Angle + Gyro Safe Flip + Gyro Filter
 =================================================
 */
 
@@ -37,6 +38,11 @@ float roll = 0;
 float pitch = 0;
 float yawRate = 0;
 
+// gyro filter
+float gxFiltered=0;
+float gyFiltered=0;
+float gzFiltered=0;
+
 float gyroXoff=0;
 float gyroYoff=0;
 float gyroZoff=0;
@@ -57,8 +63,6 @@ float rollSet = 0;
 float pitchSet = 0;
 float yawSet = 0;
 
-float throttleInput = 0;
-
 int baseThrottle = 0;
 
 bool armed = false;
@@ -72,9 +76,13 @@ float throttleFiltered = 0;
 bool flipActive = false;
 bool flipFront = true;
 
+float flipStartPitch = 0;
+bool flipStarted = false;
+
 // ================= Timing =================
 unsigned long lastTime = 0;
 unsigned long lastSignal = 0;
+unsigned long lastPID = 0;
 
 // =================================================
 
@@ -101,19 +109,20 @@ ledcAttachPin(M3,2);
 ledcAttachPin(M4,3);
 
 lastTime = millis();
+lastPID = millis();
 }
 
 // =================================================
 
-void loop() {
+void loop(){
 
 readIMU();
 readSerial();
 computePID();
 handleFlip();
 mixMotors();
-
 failsafe();
+
 }
 
 // =================================================
@@ -140,7 +149,7 @@ gyroZoff/=1000;
 }
 
 // =================================================
-// IMU READ + COMPLEMENTARY FILTER
+// IMU READ + FILTER
 // =================================================
 
 void readIMU(){
@@ -151,16 +160,21 @@ gx -= gyroXoff;
 gy -= gyroYoff;
 gz -= gyroZoff;
 
+// gyro low-pass filter
+gxFiltered = gxFiltered*0.7 + gx*0.3;
+gyFiltered = gyFiltered*0.7 + gy*0.3;
+gzFiltered = gzFiltered*0.7 + gz*0.3;
+
 float accelRoll  = atan2(ay,az) * 57.2958;
 float accelPitch = atan2(-ax, sqrt(ay*ay + az*az)) * 57.2958;
 
 float dt = (millis() - lastTime)/1000.0;
 lastTime = millis();
 
-roll  = 0.98*(roll  + gx/131.0 * dt) + 0.02*accelRoll;
-pitch = 0.98*(pitch + gy/131.0 * dt) + 0.02*accelPitch;
+roll  = 0.98*(roll  + gxFiltered/131.0 * dt) + 0.02*accelRoll;
+pitch = 0.98*(pitch + gyFiltered/131.0 * dt) + 0.02*accelPitch;
 
-yawRate = gz/131.0;
+yawRate = gzFiltered/131.0;
 
 }
 
@@ -170,7 +184,10 @@ yawRate = gz/131.0;
 
 void computePID(){
 
-float dt = 0.004;
+float dt = (millis() - lastPID)/1000.0;
+lastPID = millis();
+
+dt = constrain(dt,0.002,0.02);
 
 float rollError = rollSet - roll;
 float pitchError = pitchSet - pitch;
@@ -178,7 +195,6 @@ float pitchError = pitchSet - pitch;
 rollIntegral += rollError * dt;
 pitchIntegral += pitchError * dt;
 
-// Anti-windup
 rollIntegral = constrain(rollIntegral,-100,100);
 pitchIntegral = constrain(pitchIntegral,-100,100);
 
@@ -195,9 +211,51 @@ pidRoll  = tpa * ((Kp*rollError) + (Ki*rollIntegral) + (Kd*rollDerivative));
 pidPitch = tpa * ((Kp*pitchError) + (Ki*pitchIntegral) + (Kd*pitchDerivative));
 
 pidYaw = yawKp*(yawSet - yawRate);
+pidYaw = constrain(pidYaw,-150,150);
 
 prevRollError = rollError;
 prevPitchError = pitchError;
+
+}
+
+// =================================================
+// SAFE ANGLE + GYRO FLIP
+// =================================================
+
+void handleFlip(){
+
+if(!flipActive) return;
+
+if(!flipStarted){
+
+flipStartPitch = pitch;
+flipStarted = true;
+
+}
+
+// disable stabilization
+pidRoll = 0;
+pidYaw = 0;
+
+// throttle boost
+throttleFiltered = baseThrottle + 60;
+
+// flip torque
+if(flipFront)
+pidPitch = -200;
+else
+pidPitch = 200;
+
+// detect rotation + slowing gyro
+if(abs(pitch - flipStartPitch) > 150 && abs(gyFiltered) < 120){
+
+flipActive=false;
+flipStarted=false;
+
+rollIntegral=0;
+pitchIntegral=0;
+
+}
 
 }
 
@@ -217,7 +275,6 @@ return;
 
 }
 
-// throttle smoothing
 throttleFiltered += (baseThrottle - throttleFiltered)*0.2;
 
 int base = hoverMode ? hoverThrottle : throttleFiltered;
@@ -240,25 +297,7 @@ ledcWrite(3,m4);
 }
 
 // =================================================
-// SMART FLIP
-// =================================================
-
-void handleFlip(){
-
-if(!flipActive) return;
-
-if(abs(pitch) > 300){
-
-flipActive=false;
-rollIntegral=0;
-pitchIntegral=0;
-
-}
-
-}
-
-// =================================================
-// SERIAL CONTROL FROM ESP32-CAM
+// SERIAL CONTROL
 // =================================================
 
 void readSerial(){
